@@ -1,3 +1,4 @@
+# cache
 .vscode/
 .venv/
 .deps/
@@ -6,6 +7,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 
+# file
 data/
 examples/
 reports/
@@ -15,4 +17,5 @@ reports/
 *.joblib
 *.zip
 
+# custom
 dev-*
