@@ -11,6 +11,9 @@ __pycache__/
 data/
 examples/
 reports/
+output/
+logs/
+checkpoints/
 *.parquet
 *.feather
 *.pkl
