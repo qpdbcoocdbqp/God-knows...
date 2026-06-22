@@ -57,15 +57,19 @@ def _collate(batch):
 @torch.no_grad()
 def _evaluate(model, feature_head, loader: DataLoader, device: str, context_len: int, horizon_len: int) -> float:
     model.eval()
-    feature_head.eval()
+    if feature_head is not None:
+        feature_head.eval()
     preds, trues, weights = [], [], []
     for context, target, weight, context_features, target_features in tqdm(loader, desc="Evaluating"):
         context = context.to(device)
         target = target.to(device)
         context_features = context_features.to(device).float()
         base_pred = model(past_values=context, forecast_context_len=context_len).mean_predictions[:, :horizon_len].float()
-        delta = feature_head(context_features)
-        pred = (base_pred + delta).cpu()
+        if feature_head is not None:
+            delta = feature_head(context_features)
+            pred = (base_pred + delta).cpu()
+        else:
+            pred = base_pred.cpu()
         preds.append(pred)
         trues.append(target.cpu())
         weights.append(weight)
@@ -87,18 +91,19 @@ def train(
     model = load_base_model(model_cfg, device)
     context_len = effective_context_len(model, model_cfg.context_len)
     horizon_len = model_cfg.horizon_len
-
+    all_trainable_params = []
     if train_cfg.use_lora:
         model = apply_lora(model, lora_cfg)
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        all_trainable_params += [p for p in model.parameters() if p.requires_grad]
     else:
-        trainable_params = list(model.parameters())
-        for p in trainable_params:
+        all_trainable_params += list(model.parameters())
+        for p in all_trainable_params:
             p.requires_grad_(True)
 
-    # Build the feature correction head and add its params to the optimizer.
-    feature_head = build_feature_head(model_cfg, data_cfg, context_len, horizon_len).to(device)
-    all_trainable_params = trainable_params + list(feature_head.parameters())
+    if train_cfg.use_xreg:
+        # Build the feature correction head and add its params to the optimizer.
+        feature_head = build_feature_head(model_cfg, data_cfg, context_len, horizon_len).to(device)
+        all_trainable_params += list(feature_head.parameters())
 
     train_ds, val_ds, _ = build_datasets(data_cfg, context_len, horizon_len)
     # IterableDataset (streaming) -- do NOT pass shuffle=True; randomization
@@ -122,7 +127,8 @@ def train(
     # epoch = 1
     for epoch in range(1, train_cfg.epochs + 1):
         model.train()
-        feature_head.train()
+        if train_cfg.use_xreg:
+            feature_head.train()
         epoch_loss, n_batches = 0.0, 0
 
         for step, (context, target, weight, context_features, target_features) in tqdm(enumerate(train_loader, start=1)):
@@ -131,14 +137,16 @@ def train(
             context = context.to(device)
             target = target.to(device)
             weight = weight.to(device)
-            context_features = context_features.to(device).float()
-
             outputs = model(past_values=context, future_values=target, forecast_context_len=context_len)
             base_pred = outputs.mean_predictions[:, :model_cfg.horizon_len].float()
-            delta = feature_head(context_features)
-            pred = base_pred + delta
-            loss = loss_fn(pred, target.float(), weight.float())
+            if train_cfg.use_xreg:
+                context_features = context_features.to(device).float()
+                delta = feature_head(context_features)
+                pred = base_pred + delta
+            else:
+                pred = base_pred
 
+            loss = loss_fn(pred, target.float(), weight.float())
             loss.backward()
             torch.nn.utils.clip_grad_norm_(all_trainable_params, train_cfg.grad_clip_norm)
             optimizer.step()
@@ -150,7 +158,10 @@ def train(
                 print(f"[epoch {epoch}] step {step} (streamed) loss={epoch_loss / step:.6f}", flush=True)
 
         avg_train_loss = epoch_loss / max(1, n_batches)
-        val_r2 = _evaluate(model, feature_head, val_loader, device, context_len, model_cfg.horizon_len)
+        if train_cfg.use_xreg:
+            val_r2 = _evaluate(model, feature_head, val_loader, device, context_len, model_cfg.horizon_len)
+        else:
+            val_r2 = _evaluate(model, None, val_loader, device, context_len, model_cfg.horizon_len)
         scheduler.step(val_r2)
         print(f"[epoch {epoch}/{train_cfg.epochs}] batches={n_batches} "
               f"train_weighted_loss={avg_train_loss:.6f} val_weighted_R2={val_r2:.6f}", flush=True)
@@ -159,8 +170,11 @@ def train(
             best_r2 = val_r2
             epochs_no_improve = 0
             model.save_pretrained(train_cfg.output_dir)
-            save_feature_head(feature_head, train_cfg.output_dir)
-            print(f"  -> new best (val_R2={best_r2:.6f}), saved adapter + feature head to {train_cfg.output_dir}")
+            if train_cfg.use_xreg:
+                save_feature_head(feature_head, train_cfg.output_dir)
+                print(f"  -> new best (val_R2={best_r2:.6f}), saved adapter + feature head to {train_cfg.output_dir}")
+            else:
+                print(f"  -> new best (val_R2={best_r2:.6f}), saved adapter to {train_cfg.output_dir}")
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= train_cfg.patience:
@@ -172,8 +186,8 @@ def train(
 
 
 if __name__ == "__main__":
-    data_cfg = DataConfig(symbol_sample_rate=0.01)
+    data_cfg = DataConfig(symbol_sample_rate=0.03)
     model_cfg = ModelConfig()
-    train_cfg = TrainConfig()
+    train_cfg = TrainConfig(use_xreg=False)
     lora_cfg = LoraConfigOpts()
     train(data_cfg, model_cfg, train_cfg, lora_cfg)

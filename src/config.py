@@ -103,6 +103,7 @@ class TrainConfig:
     output_dir: str = "./checkpoints/jane_street_lora_adapter"
     log_every: int = 50
     use_lora: bool = True          # set False to fully fine-tune all weights instead
+    use_xreg: bool = True
 
 
 @dataclass

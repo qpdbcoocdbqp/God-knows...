@@ -29,6 +29,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as csv
 import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 # On Windows, importing pyarrow.dataset after torch can trigger a native
 # access violation in some environments. Preload it before torch.
@@ -79,37 +80,42 @@ def generate_predictions(
 ) -> pd.DataFrame:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     _ = model.eval()
-    _ = feature_head.eval()
+    if feature_head is not None:
+        _ = feature_head.eval()
 
     _train , _valid, test_ds = build_datasets(data_cfg, context_len, model_cfg.horizon_len, load_test=True)
     loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=_collate)
 
     rows = []
-    n = 0
     with torch.inference_mode():
         for context, target, context_features, weight, symbol_id, date_id, time_id in tqdm(loader):
             context = context.to(device)
-            context_features = context_features.to(device).float()
             base_pred = model(past_values=context, forecast_context_len=context_len).mean_predictions[:, :model_cfg.horizon_len]
-            delta = feature_head(context_features)
-            pred = (base_pred + delta).float().cpu().detach().numpy()
+            if feature_head is not None:
+                context_features = context_features.to(device).float()
+                delta = feature_head(context_features)
+                pred = (base_pred + delta).float().cpu().detach().numpy()
+            else:
+                pred = base_pred.float().cpu().detach().numpy()
             target = target.numpy()
             weight = weight.numpy()
             h = pred.shape[1]
-            for t in range(h):
-                rows.append(pa.table({
+            for t in range(h): # t=0
+                tmp = pa.table({
                     data_cfg.symbol_col: symbol_id.tolist(),
                     data_cfg.date_col: date_id.tolist(),
                     data_cfg.time_col: time_id.tolist(),
                     data_cfg.weight_col: weight[:, t].tolist(),
                     f"{data_cfg.target_col}_true": target[:, t].tolist(),
-                    f"{data_cfg.target_col}_pred": pred[:, t].tolist(),
-                }))
+                    f"{data_cfg.target_col}_pred": pred[:, t].tolist(),    
+                })
+                if feature_head is not None:
+                    tmp = tmp.append_column("delta_pred", [delta[:, t].tolist()])
+                rows.append(tmp)
     output = pa.concat_tables(rows)
     return output
 
-# df = output
-def simulate_pnl(df: pa.Table, data_cfg: DataConfig, bt_cfg: BacktestConfig, label: str = "model") -> pd.DataFrame:
+def simulate_pnl(df: pa.Table, data_cfg: DataConfig, bt_cfg: BacktestConfig, label: str = "model_lora") -> pd.DataFrame:
     """
     position = sign(prediction); daily_pnl = sum(weight * position * true_value) per date_id.
     utility = (sum(daily_pnl) / sqrt(sum(daily_pnl^2))) * sqrt(annualization_days / n_days)
@@ -139,9 +145,8 @@ def simulate_pnl(df: pa.Table, data_cfg: DataConfig, bt_cfg: BacktestConfig, lab
     print(f"  utility (Sharpe-like, annualized): {utility:.4f}")
 
     os.makedirs(bt_cfg.output_dir, exist_ok=True)
-
-    csv.write_csv(daily, os.path.join(bt_cfg.output_dir, f"daily_pnl_{label}.csv"))
-    csv.write_csv(df, os.path.join(bt_cfg.output_dir, f"predictions_{label}.csv"))
+    pq.write_table(df, os.path.join(bt_cfg.output_dir, f"predictions_{label}.parquet"))
+    pq.write_table(daily, os.path.join(bt_cfg.output_dir, f"daily_pnl_{label}.parquet"))
 
     return daily
 
@@ -156,7 +161,10 @@ def run_backtest(
 
     if adapter_dir and os.path.isdir(adapter_dir):
         ft_model = load_adapter(model_cfg, adapter_dir, device)
-        ft_feature_head = load_feature_head(adapter_dir, device)
+        try:
+            ft_feature_head = load_feature_head(adapter_dir, device)
+        except:
+            ft_feature_head = None
         context_len = effective_context_len(ft_model, model_cfg.context_len)
         ft_pred_df = generate_predictions(ft_model, ft_feature_head, data_cfg, model_cfg, context_len)
         ft_daily = simulate_pnl(ft_pred_df, data_cfg, bt_cfg, label="finetuned")
@@ -167,7 +175,7 @@ def run_backtest(
     if bt_cfg.compare_zero_shot:
         base_model = load_base_model(model_cfg, device)
         context_len = effective_context_len(base_model, model_cfg.context_len)
-        base_pred_df = generate_predictions(base_model, data_cfg, model_cfg, context_len)
+        base_pred_df = generate_predictions(base_model, None, data_cfg, model_cfg, context_len)
         simulate_pnl(base_pred_df, data_cfg, bt_cfg, label="zero_shot")
 
     return ft_pred_df, ft_daily

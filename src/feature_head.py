@@ -75,8 +75,8 @@ class FeatureCorrectionHead(nn.Module):
         # Initialise the last linear layer near zero so the head starts as a
         # near-identity correction (i.e. doesn't disturb the base model at
         # the beginning of training).
-        nn.init.zeros_(self.net[-1].weight)
-        nn.init.zeros_(self.net[-1].bias)
+        # nn.init.zeros_(self.net[-1].weight)
+        # nn.init.zeros_(self.net[-1].bias)
 
     def forward(self, context_features: torch.Tensor) -> torch.Tensor:
         """
