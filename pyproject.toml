@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jsforecast"
+version = "0.1.0"
+description = "TimesFM forecasting pipeline for the Jane Street Real-Time Market Data Forecasting data"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "transformers>=4.57",
+    "peft>=0.13",
+    "accelerate>=0.34",
+    "numpy>=1.24",
+    "pyarrow>=14.0",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+# TimesFM 3.0 lives in the standalone `timesfm` package (module `timesfm3`).
+timesfm3 = ["timesfm[torch]==3.0.2"]
+dev = ["pytest>=8"]
+# Only needed by the helper scripts in scripts/.
+scripts = ["pandas>=2.0", "kaggle"]
+
+[project.scripts]
+jsforecast = "jsforecast.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["jsforecast*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs the real Jane Street data and downloaded model weights (deselected by default)",
+]
+addopts = "-m 'not integration'"
