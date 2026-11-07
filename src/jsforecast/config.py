@@ -112,6 +112,8 @@ class TrainConfig:
     grad_clip_norm: float = 1.0
     output_dir: str = "./checkpoints/jane_street_lora_adapter"
     log_every: int = 50
+    # False skips the per-epoch validation: the last epoch is saved instead of the best one.
+    validate: bool = True
     # Debug/smoke-test caps (None = a full pass over the streamed partitions).
     max_train_batches: Optional[int] = None
     max_val_batches: Optional[int] = None

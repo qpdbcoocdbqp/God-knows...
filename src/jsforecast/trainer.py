@@ -17,7 +17,7 @@ import itertools
 from dataclasses import dataclass
 
 import torch
-from tqdm import tqdm
+from tqdm.auto import tqdm  # notebook widget in Jupyter / interactive window, text bar in a terminal
 
 from .config import DataConfig, TrainConfig
 from .data import JaneStreetDataModule
@@ -81,7 +81,8 @@ class Trainer:
         device = self.forecaster.device
         total_loss, n_batches = 0.0, 0
         batches = itertools.islice(loader, self.cfg.max_train_batches)
-        for step, batch in tqdm(enumerate(batches, start=1), desc=f"Epoch {epoch}"):
+        progress = tqdm(batches, desc=f"Epoch {epoch}", total=self.cfg.max_train_batches)
+        for step, batch in enumerate(progress, start=1):
             pred = self.forecaster.predict(batch)
             loss = self.loss_fn(pred, batch.target.to(device).float(), batch.weight.to(device).float())
             loss.backward()
@@ -91,8 +92,9 @@ class Trainer:
 
             total_loss += loss.item()
             n_batches += 1
+            progress.set_postfix(loss=f"{loss.item():.6f}", avg=f"{total_loss / step:.6f}")
             if step % self.cfg.log_every == 0:
-                print(f"[epoch {epoch}] step {step} (streamed) loss={total_loss / step:.6f}", flush=True)
+                progress.write(f"[epoch {epoch}] step {step} (streamed) loss={total_loss / step:.6f}")
         return total_loss / max(1, n_batches), n_batches
 
     def fit(self) -> TrainResult:
@@ -109,6 +111,11 @@ class Trainer:
         for epoch in range(1, cfg.epochs + 1):
             epochs_run = epoch
             avg_loss, n_batches = self._train_epoch(epoch, train_loader, optimizer, params)
+            if not cfg.validate:
+                # no validation: no best-checkpoint selection, keep the latest epoch
+                print(f"[epoch {epoch}/{cfg.epochs}] batches={n_batches} train_weighted_loss={avg_loss:.6f}", flush=True)
+                self.forecaster.save(cfg.output_dir)
+                continue
             val_r2 = self._validate(val_loader)
             scheduler.step(val_r2)
             print(f"[epoch {epoch}/{cfg.epochs}] batches={n_batches} "
@@ -121,5 +128,8 @@ class Trainer:
                 print(f"Early stopping at epoch {epoch} (no improvement for {cfg.patience} epochs).")
                 break
 
+        if not cfg.validate:
+            print(f"Training complete (validation off), saved to {cfg.output_dir}")
+            return TrainResult(best_val_r2=float("nan"), output_dir=cfg.output_dir, epochs_run=epochs_run)
         print(f"Training complete. Best validation weighted R^2: {stopper.best:.6f}")
         return TrainResult(best_val_r2=stopper.best, output_dir=cfg.output_dir, epochs_run=epochs_run)

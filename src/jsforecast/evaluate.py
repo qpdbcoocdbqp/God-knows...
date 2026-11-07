@@ -23,7 +23,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import torch
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from .config import BacktestConfig, DataConfig
 from .models.base import Forecaster
@@ -53,7 +53,7 @@ class Predictor:
     ) -> pa.Table:
         forecaster.set_training(False)
         tables = []
-        for batch in tqdm(itertools.islice(loader, max_batches), desc=desc):
+        for batch in tqdm(itertools.islice(loader, max_batches), desc=desc, total=max_batches):
             pred = forecaster.predict(batch).float().cpu().numpy()
             tables.append(build_prediction_table(
                 self.data_cfg,
